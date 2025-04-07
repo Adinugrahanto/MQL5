@@ -1,0 +1,634 @@
+//+------------------------------------------------------------------+
+//|                     SLSR EA - Single File Version                |
+//+------------------------------------------------------------------+
+#property version   "6.01" // Refined Condition B for Entry Signal
+#property description "Stop Loss Scalper EA based on ATR with refined MACD/EMA entry. Single file, class-based design."
+#property strict
+
+#include <Trade\Trade.mqh>
+
+//+------------------------------------------------------------------+
+//| Input Parameters (Global Scope)                                  |
+//+------------------------------------------------------------------+
+input group "ATR Settings (SL/TP)"
+input int      InpAtrPeriod       = 14;     // ATR Period for SL/TP calculation
+input double   InpSlAtrMultiplier = 1.5;    // SL ATR Multiplier (Stop Loss distance = ATR * Multiplier)
+input double   InpTpRR            = 2.0;    // TP Risk/Reward Ratio (Take Profit distance = SL Distance * RR)
+
+input group "Entry Signal Settings"
+input int      InpMacdFastPeriod  = 4;      // MACD Fast EMA Period
+input int      InpMacdSlowPeriod  = 13;     // MACD Slow EMA Period
+input int      InpMacdSignalPeriod= 4;      // MACD Signal Line SMA Period
+input int      InpEmaPeriod       = 50;     // EMA Period for Trend/Price Action Filter
+
+input group "Risk Management"
+input double   InpRiskPercent     = 2.0;    // Percent of Equity to Risk per Trade
+
+input group "Order Settings"
+input int      InpMagicNumber     = 12345;  // Magic Number for orders placed by this EA
+input ulong    InpDeviationPoints = 10;      // Allowed slippage in points
+
+//+------------------------------------------------------------------+
+//| Expert Advisor Class Definition                                  |
+//+------------------------------------------------------------------+
+class CSLSR_EA
+{
+private:
+    //--- Input Parameters (passed via constructor)
+    int               m_atr_period;
+    double            m_sl_atr_multiplier;
+    double            m_tp_rr;
+    int               m_macd_fast_period;
+    int               m_macd_slow_period;
+    int               m_macd_signal_period;
+    int               m_ema_period;
+    double            m_risk_percent;
+    int               m_magic_number;
+    ulong             m_deviation_points;
+
+    //--- Service Objects
+    CTrade            m_trade;
+
+    //--- Indicator Handles
+    int               m_atr_handle;
+    int               m_macd_handle; // Handle for MACD
+    int               m_ema_handle;  // Handle for EMA
+
+    //--- State Variables
+    datetime          m_last_trade_time;
+    string            m_symbol;
+    int               m_digits;
+    double            m_point;
+    int               m_volume_digits;
+    ENUM_ORDER_TYPE_FILLING m_filling_type;
+
+    //--- Private Methods (Declarations)
+    bool              CheckTradingTime(datetime currentTime);
+    double            GetATR();
+    bool              CheckEntrySignal(); // Method for signal logic
+    bool              CalculateTradeParameters(double atrValue, double& slDistance, double& tpDistance, double& stopLoss, double& takeProfit);
+    double            CalculateLotSize(double stopLossDistance);
+    bool              CheckStopLevel(double ask, double bid, double slPrice, double tpPrice);
+    void              DrawTradeMarker(datetime time, double price);
+    ENUM_ORDER_TYPE_FILLING DetermineFillingType();
+
+public:
+    //--- Constructor
+                      CSLSR_EA(int atrPeriod, double slAtrMultiplier, double tpRR,
+                               int macdFast, int macdSlow, int macdSignal, int emaPeriod,
+                               double riskPercent, int magicNumber, ulong deviation);
+    //--- Destructor
+                     ~CSLSR_EA();
+
+    //--- Public Methods (Declarations - called from MQL5 handlers)
+    bool              Init();
+    void              Deinit(const int reason);
+    void              Tick();
+};
+
+//+------------------------------------------------------------------+
+//| Global Variables                                                 |
+//+------------------------------------------------------------------+
+CSLSR_EA *g_ea = NULL; // Global pointer to the EA class instance
+const string EA_VERSION = "6.01"; // Define version string globally
+
+//+------------------------------------------------------------------+
+//| Expert initialization function (Standard MQL5 Handler)           |
+//+------------------------------------------------------------------+
+int OnInit()
+{
+   // Check input parameters for basic validity
+   if(InpAtrPeriod <= 0 || InpSlAtrMultiplier <= 0 || InpTpRR <= 0 || InpRiskPercent <= 0 ||
+      InpMacdFastPeriod <= 0 || InpMacdSlowPeriod <= 0 || InpMacdSignalPeriod <= 0 || InpEmaPeriod <= 0 ||
+      InpMacdFastPeriod >= InpMacdSlowPeriod) // Basic MACD sanity check
+   {
+      Print("Invalid input parameter(s). Values must be positive. MACD Fast must be < Slow.");
+      return(INIT_PARAMETERS_INCORRECT);
+   }
+
+   // Create EA class instance, passing input parameters
+   if(g_ea != NULL)
+   {
+      delete g_ea;
+      g_ea = NULL;
+   }
+   // Pass all inputs to constructor
+   g_ea = new CSLSR_EA(InpAtrPeriod, InpSlAtrMultiplier, InpTpRR,
+                       InpMacdFastPeriod, InpMacdSlowPeriod, InpMacdSignalPeriod, InpEmaPeriod,
+                       InpRiskPercent, InpMagicNumber, InpDeviationPoints);
+   if(g_ea == NULL)
+   {
+      Print("Failed to create EA object. Memory allocation error.");
+      return(INIT_FAILED);
+   }
+
+   // Initialize the EA instance using its Init method
+   if(!g_ea.Init())
+   {
+      Print("EA class initialization failed. See previous messages for details.");
+      delete g_ea;
+      g_ea = NULL;
+      return(INIT_FAILED);
+   }
+
+   return(INIT_SUCCEEDED);
+}
+
+//+------------------------------------------------------------------+
+//| Expert deinitialization function (Standard MQL5 Handler)         |
+//+------------------------------------------------------------------+
+void OnDeinit(const int reason)
+{
+   if(g_ea != NULL)
+   {
+      g_ea.Deinit(reason);
+      delete g_ea;
+      g_ea = NULL;
+   }
+   PrintFormat("%s Ver %s deinitialized globally. Reason: %d", MQL5InfoString(MQL5_PROGRAM_NAME), EA_VERSION, reason);
+}
+
+//+------------------------------------------------------------------+
+//| Expert tick function (Standard MQL5 Handler)                     |
+//+------------------------------------------------------------------+
+void OnTick()
+{
+   if(g_ea != NULL)
+   {
+      g_ea.Tick();
+   }
+   else
+   {
+      Print("Error: EA object pointer is NULL in OnTick(). EA cannot function.");
+      // ExpertRemove(); // Optional: Stop the EA
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Class Method Implementations                                     |
+//+------------------------------------------------------------------+
+
+//+------------------------------------------------------------------+
+//| Constructor Implementation                                       |
+//+------------------------------------------------------------------+
+CSLSR_EA::CSLSR_EA(int atrPeriod, double slAtrMultiplier, double tpRR,
+                   int macdFast, int macdSlow, int macdSignal, int emaPeriod,
+                   double riskPercent, int magicNumber, ulong deviation) :
+    m_atr_period(atrPeriod),
+    m_sl_atr_multiplier(slAtrMultiplier),
+    m_tp_rr(tpRR),
+    m_macd_fast_period(macdFast),
+    m_macd_slow_period(macdSlow),
+    m_macd_signal_period(macdSignal),
+    m_ema_period(emaPeriod),
+    m_risk_percent(riskPercent),
+    m_magic_number(magicNumber),
+    m_deviation_points(deviation),
+    m_atr_handle(INVALID_HANDLE),
+    m_macd_handle(INVALID_HANDLE), // Initialize new handles
+    m_ema_handle(INVALID_HANDLE),  // Initialize new handles
+    m_last_trade_time(0),
+    m_symbol(""),
+    m_digits(0),
+    m_point(0.0),
+    m_volume_digits(2),
+    m_filling_type(ORDER_FILLING_FOK)
+{
+    // Constructor body
+}
+
+//+------------------------------------------------------------------+
+//| Destructor Implementation                                        |
+//+------------------------------------------------------------------+
+CSLSR_EA::~CSLSR_EA()
+{
+    // Release all indicator handles
+    if(m_atr_handle != INVALID_HANDLE) IndicatorRelease(m_atr_handle);
+    if(m_macd_handle != INVALID_HANDLE) IndicatorRelease(m_macd_handle);
+    if(m_ema_handle != INVALID_HANDLE) IndicatorRelease(m_ema_handle);
+}
+
+//+------------------------------------------------------------------+
+//| Determine Filling Type Helper Method                             |
+//+------------------------------------------------------------------+
+ENUM_ORDER_TYPE_FILLING CSLSR_EA::DetermineFillingType()
+{
+   long allowed_filling_types = SymbolInfoInteger(m_symbol, SYMBOL_FILLING_MODE);
+   ENUM_ORDER_TYPE_FILLING filling = ORDER_FILLING_FOK; // Default to FOK
+
+   if((allowed_filling_types & SYMBOL_FILLING_FOK) != 0)
+   {
+      filling = ORDER_FILLING_FOK;
+   }
+   else if((allowed_filling_types & SYMBOL_FILLING_IOC) != 0)
+   {
+      filling = ORDER_FILLING_IOC;
+   }
+   return filling;
+}
+
+
+//+------------------------------------------------------------------+
+//| Init Method Implementation (Class Internal Initialization)       |
+//+------------------------------------------------------------------+
+bool CSLSR_EA::Init()
+{
+    m_symbol = Symbol();
+    m_digits = (int)SymbolInfoInteger(m_symbol, SYMBOL_DIGITS);
+    m_point = SymbolInfoDouble(m_symbol, SYMBOL_POINT);
+
+    double lotStep = SymbolInfoDouble(m_symbol, SYMBOL_VOLUME_STEP);
+    if(lotStep > 0 && lotStep < 1)
+        m_volume_digits = (int)MathAbs(MathLog10(lotStep));
+    else if(lotStep >= 1)
+        m_volume_digits = 0;
+    else
+        m_volume_digits = 2;
+
+    m_filling_type = DetermineFillingType();
+
+    m_trade.SetExpertMagicNumber(m_magic_number);
+    m_trade.SetDeviationInPoints(m_deviation_points);
+
+    // --- Create Indicator Handles ---
+    // Release previous handles if Init is called again
+    if(m_atr_handle != INVALID_HANDLE) IndicatorRelease(m_atr_handle);
+    if(m_macd_handle != INVALID_HANDLE) IndicatorRelease(m_macd_handle);
+    if(m_ema_handle != INVALID_HANDLE) IndicatorRelease(m_ema_handle);
+
+    // ATR Handle
+    m_atr_handle = iATR(m_symbol, PERIOD_CURRENT, m_atr_period);
+    if(m_atr_handle == INVALID_HANDLE)
+    {
+        PrintFormat("Failed to create ATR indicator handle for %s. Error: %d", m_symbol, GetLastError());
+        return false;
+    }
+
+    // MACD Handle
+    m_macd_handle = iMACD(m_symbol, PERIOD_CURRENT, m_macd_fast_period, m_macd_slow_period, m_macd_signal_period, PRICE_CLOSE);
+    if(m_macd_handle == INVALID_HANDLE)
+    {
+        PrintFormat("Failed to create MACD indicator handle for %s. Error: %d", m_symbol, GetLastError());
+        return false;
+    }
+
+    // EMA Handle
+    m_ema_handle = iMA(m_symbol, PERIOD_CURRENT, m_ema_period, 0, MODE_EMA, PRICE_CLOSE);
+     if(m_ema_handle == INVALID_HANDLE)
+    {
+        PrintFormat("Failed to create EMA indicator handle for %s. Error: %d", m_symbol, GetLastError());
+        return false;
+    }
+
+    PrintFormat("%s Ver %s initialized successfully for %s.", MQL5InfoString(MQL5_PROGRAM_NAME), EA_VERSION, m_symbol);
+    PrintFormat("Parameters: ATR(%d), SL Multiplier(%.2f), TP RR(%.1f), Risk(%.2f%%), Magic(%d), Deviation(%d)",
+                m_atr_period, m_sl_atr_multiplier, m_tp_rr, m_risk_percent, m_magic_number, m_deviation_points);
+    PrintFormat("Signal Params: MACD(%d,%d,%d), EMA(%d), Volume Digits(%d), Filling(%s)",
+                m_macd_fast_period, m_macd_slow_period, m_macd_signal_period, m_ema_period, m_volume_digits, EnumToString(m_filling_type));
+    return true;
+}
+
+//+------------------------------------------------------------------+
+//| Deinit Method Implementation (Class Internal Deinitialization)   |
+//+------------------------------------------------------------------+
+void CSLSR_EA::Deinit(const int reason)
+{
+    // Release all indicator handles
+    if(m_atr_handle != INVALID_HANDLE) IndicatorRelease(m_atr_handle);
+    if(m_macd_handle != INVALID_HANDLE) IndicatorRelease(m_macd_handle);
+    if(m_ema_handle != INVALID_HANDLE) IndicatorRelease(m_ema_handle);
+    m_atr_handle = INVALID_HANDLE; // Ensure handles are marked invalid
+    m_macd_handle = INVALID_HANDLE;
+    m_ema_handle = INVALID_HANDLE;
+
+    PrintFormat("%s Ver %s class instance deinitialized. Reason: %d", MQL5InfoString(MQL5_PROGRAM_NAME), EA_VERSION, reason);
+}
+
+//+------------------------------------------------------------------+
+//| CheckTradingTime Method Implementation                           |
+//+------------------------------------------------------------------+
+bool CSLSR_EA::CheckTradingTime(datetime currentTime)
+{
+    MqlDateTime t1, t2;
+    TimeToStruct(currentTime, t1);
+    TimeToStruct(m_last_trade_time, t2);
+
+    if(m_last_trade_time != 0 && t1.year == t2.year && t1.mon == t2.mon && t1.day == t2.day)
+    {
+       return false;
+    }
+    return true;
+}
+
+//+------------------------------------------------------------------+
+//| GetATR Method Implementation                                     |
+//+------------------------------------------------------------------+
+double CSLSR_EA::GetATR()
+{
+    if(m_atr_handle == INVALID_HANDLE) { Print("ATR handle invalid in GetATR."); return -1.0; }
+
+    double atrBuffer[1];
+    // Need enough bars for ATR calculation + 1 previous bar to read from
+    if(BarsCalculated(m_atr_handle) < m_atr_period + 1)
+    {
+        // PrintFormat("Not enough calculated bars (%d) for ATR(%d) handle on %s.", BarsCalculated(m_atr_handle), m_atr_period, m_symbol);
+        return -1.0;
+    }
+
+    if(CopyBuffer(m_atr_handle, 0, 1, 1, atrBuffer) <= 0)
+    {
+        PrintFormat("Failed to copy ATR buffer data. Error: %d", GetLastError());
+        return -1.0;
+    }
+
+    if(atrBuffer[0] <= 1e-10 || atrBuffer[0] == EMPTY_VALUE)
+    {
+        // PrintFormat("Invalid ATR value received from buffer: %.5f", atrBuffer[0]);
+        return -1.0;
+    }
+    return atrBuffer[0];
+}
+
+//+------------------------------------------------------------------+
+//| CheckEntrySignal Method Implementation                           |
+//+------------------------------------------------------------------+
+bool CSLSR_EA::CheckEntrySignal()
+{
+    // --- Ensure indicator handles are valid ---
+    if(m_macd_handle == INVALID_HANDLE || m_ema_handle == INVALID_HANDLE)
+    {
+        Print("MACD or EMA handle invalid in CheckEntrySignal.");
+        return false;
+    }
+
+    // --- Determine number of bars required ---
+    int bars_required = MathMax(m_macd_slow_period, m_ema_period) + 3; // Max indicator period + lookback bars
+    if(Bars(_Symbol, PERIOD_CURRENT) < bars_required)
+    {
+        // PrintFormat("Not enough bars (%d) for signal calculation (requires %d).", Bars(_Symbol, PERIOD_CURRENT), bars_required);
+        return false;
+    }
+    if(BarsCalculated(m_macd_handle) < 4 || BarsCalculated(m_ema_handle) < 2)
+    {
+       // PrintFormat("Not enough calculated bars for MACD (%d) or EMA (%d).", BarsCalculated(m_macd_handle), BarsCalculated(m_ema_handle));
+       return false;
+    }
+
+    // --- Prepare buffers ---
+    int data_to_copy = 3;
+    int start_bar_index = 1;
+    double macd_main_buf[3];
+    double macd_signal_buf[3];
+    double ema_buf[1];
+    double open_buf[1];
+    double close_buf[1];
+
+    // --- Copy indicator and price data ---
+    if(CopyBuffer(m_macd_handle, 0, start_bar_index, data_to_copy, macd_main_buf) != data_to_copy) { PrintFormat("Failed to copy MACD Main buffer. Error: %d", GetLastError()); return false; }
+    if(CopyBuffer(m_macd_handle, 1, start_bar_index, data_to_copy, macd_signal_buf) != data_to_copy) { PrintFormat("Failed to copy MACD Signal buffer. Error: %d", GetLastError()); return false; }
+    if(CopyBuffer(m_ema_handle, 0, start_bar_index, 1, ema_buf) != 1) { PrintFormat("Failed to copy EMA buffer. Error: %d", GetLastError()); return false; }
+    if(CopyOpen(_Symbol, PERIOD_CURRENT, start_bar_index, 1, open_buf) != 1) { PrintFormat("Failed to copy Open price data. Error: %d", GetLastError()); return false; }
+    if(CopyClose(_Symbol, PERIOD_CURRENT, start_bar_index, 1, close_buf) != 1) { PrintFormat("Failed to copy Close price data. Error: %d", GetLastError()); return false; }
+
+    // --- Map buffer indices to bar numbers ---
+    double main1 = macd_main_buf[0]; double signal1 = macd_signal_buf[0]; double hist1 = main1 - signal1;
+    double main2 = macd_main_buf[1]; double signal2 = macd_signal_buf[1]; double hist2 = main2 - signal2;
+    double main3 = macd_main_buf[2]; double signal3 = macd_signal_buf[2]; double hist3 = main3 - signal3;
+    double ema1 = ema_buf[0];
+    double open1 = open_buf[0];
+    double close1 = close_buf[0];
+
+    // --- Check Conditions ---
+    // A> MACD histogram and signal line under zero Line (on last closed bar [1])
+    bool conditionA = (hist1 < 0 && signal1 < 0);
+
+    // B> 2 consecutive of 2 previous MACD histogram were higher than signal line (Bars [2] and [3])
+    //    *** THIS IS THE MODIFIED LINE ***
+    bool conditionB = (hist2 > 0 && hist3 > 0);
+
+    // C> Last candle [1] is bullish and close above EMA 50
+    bool conditionC = (close1 > open1 && close1 > ema1);
+
+    // --- Combine all conditions ---
+    bool buy_signal = conditionA && conditionB && conditionC;
+
+    // Optional: Print signal components for debugging
+    // MqlRates rates[]; ArraySetAsSeries(rates, true); CopyRates(_Symbol, PERIOD_CURRENT, 1, 4, rates); // Get time for bars
+    // if(buy_signal) PrintFormat("%s: Buy Signal Met: A=%d, B=%d, C=%d [H1:%.5f, S1:%.5f | H2:%.5f, H3:%.5f | C1:%.5f, O1:%.5f, E1:%.5f]",
+    //                            TimeToString(rates[0].time), conditionA, conditionB, conditionC, hist1, signal1, hist2, hist3, close1, open1, ema1);
+    // else PrintFormat("%s: Buy Signal NOT Met: A=%d, B=%d, C=%d [H1:%.5f, S1:%.5f | H2:%.5f, H3:%.5f | C1:%.5f, O1:%.5f, E1:%.5f]",
+    //                  TimeToString(rates[0].time), conditionA, conditionB, conditionC, hist1, signal1, hist2, hist3, close1, open1, ema1);
+
+
+    return buy_signal;
+}
+
+
+//+------------------------------------------------------------------+
+//| CalculateTradeParameters Method Implementation                   |
+//+------------------------------------------------------------------+
+bool CSLSR_EA::CalculateTradeParameters(double atrValue, double& slDistance, double& tpDistance, double& stopLoss, double& takeProfit)
+{
+    if(atrValue <= 0) { Print("Cannot calculate parameters with non-positive ATR value."); return false; }
+
+    MqlTick latest_tick;
+    if(!SymbolInfoTick(m_symbol, latest_tick)) { PrintFormat("Failed to get latest tick for %s. Error: %d", m_symbol, GetLastError()); return false; }
+    double ask = latest_tick.ask;
+    if(ask <= 0) { PrintFormat("Invalid ask price received: %.*f", m_digits, ask); return false; }
+
+    slDistance = atrValue * m_sl_atr_multiplier;
+    tpDistance = slDistance * m_tp_rr;
+
+    if(slDistance <= (m_point / 10.0) || tpDistance <= (m_point / 10.0)) {
+        PrintFormat("Calculated SL/TP distance too small. SL: %.*f, TP: %.*f, ATR: %.*f, Point: %.*f",
+                    m_digits, slDistance, m_digits, tpDistance, m_digits, atrValue, m_digits + 1, m_point);
+        return false;
+    }
+
+    stopLoss = ask - slDistance;
+    takeProfit = ask + tpDistance;
+
+    stopLoss = NormalizeDouble(stopLoss, m_digits);
+    takeProfit = NormalizeDouble(takeProfit, m_digits);
+
+    if (stopLoss >= ask || takeProfit <= ask) {
+        PrintFormat("SL/TP calculation error after normalization: Ask=%.*f, SL=%.*f, TP=%.*f",
+                    m_digits, ask, m_digits, stopLoss, m_digits, takeProfit);
+        return false;
+    }
+    return true;
+}
+
+//+------------------------------------------------------------------+
+//| CalculateLotSize Method Implementation (Equity Risk Based)       |
+//+------------------------------------------------------------------+
+double CSLSR_EA::CalculateLotSize(double stopLossDistance)
+{
+    double equity = AccountInfoDouble(ACCOUNT_EQUITY);
+    if(equity <= 0) { PrintFormat("Invalid account equity: %.2f", equity); return 0.0; }
+
+    double riskAmount = equity * m_risk_percent / 100.0;
+    if(riskAmount <= 0) { PrintFormat("Risk amount is zero or negative based on Equity=%.2f, Risk=%.2f%%", equity, m_risk_percent); return 0.0; }
+
+    if(stopLossDistance <= (m_point / 10.0)) { PrintFormat("Invalid stop loss distance for lot calculation: %.*f", m_digits, stopLossDistance); return 0.0; }
+
+    double tickValue = SymbolInfoDouble(m_symbol, SYMBOL_TRADE_TICK_VALUE);
+    double tickSize = SymbolInfoDouble(m_symbol, SYMBOL_TRADE_TICK_SIZE);
+
+    if(tickSize <= 1e-10 || tickValue <= 1e-10) { PrintFormat("Invalid symbol properties for %s: TickSize=%.*f, TickValue=%.5f", m_symbol, m_digits + 1, tickSize, tickValue); return 0.0; }
+
+    double lossPerLot = (stopLossDistance / tickSize) * tickValue;
+    if(lossPerLot <= 1e-10) { PrintFormat("Calculated loss per lot is too small or zero: %.10f. SL Distance: %.*f, Tick Size: %.*f, Tick Value: %.5f", lossPerLot, m_digits, stopLossDistance, m_digits + 1, tickSize, tickValue); return 0.0; }
+
+    double lot = riskAmount / lossPerLot;
+
+    double minLot = SymbolInfoDouble(m_symbol, SYMBOL_VOLUME_MIN);
+    double maxLot = SymbolInfoDouble(m_symbol, SYMBOL_VOLUME_MAX);
+    double lotStep = SymbolInfoDouble(m_symbol, SYMBOL_VOLUME_STEP);
+
+    lot = MathFloor(lot / lotStep + 1e-9) * lotStep;
+    lot = MathMax(minLot, MathMin(lot, maxLot));
+
+    if (lot < minLot) { PrintFormat("Calculated lot size (%.*f after adjustments) is below minimum volume (%.*f). Cannot place trade with specified risk %.2f%% (%.2f %s).", m_volume_digits, lot, m_volume_digits, minLot, m_risk_percent, riskAmount, AccountInfoString(ACCOUNT_CURRENCY)); return 0.0; }
+
+    return NormalizeDouble(lot, m_volume_digits);
+}
+
+
+//+------------------------------------------------------------------+
+//| CheckStopLevel Method Implementation                             |
+//+------------------------------------------------------------------+
+bool CSLSR_EA::CheckStopLevel(double ask, double bid, double slPrice, double tpPrice)
+{
+    if (ask <= 0 || bid <= 0 || slPrice <= 0 || tpPrice <= 0 || slPrice >= ask || tpPrice <= ask) { PrintFormat("Invalid prices for StopLevel check: Ask=%.*f, Bid=%.*f, SL=%.*f, TP=%.*f", m_digits, ask, m_digits, bid, m_digits, slPrice, m_digits, tpPrice); return false; }
+
+    int stopLevelPoints = (int)SymbolInfoInteger(m_symbol, SYMBOL_TRADE_STOPS_LEVEL);
+    if (stopLevelPoints <= 0) { return true; }
+
+    double minStopDistance = stopLevelPoints * m_point;
+
+    if ((ask - slPrice) < (minStopDistance - m_point * 0.1)) { PrintFormat("Stop Loss (%.*f) violates minimum stop level. Distance to Ask (%.*f) is %.*f, Minimum required: %.*f (%d points)", m_digits, slPrice, m_digits, ask, m_digits, (ask - slPrice), m_digits, minStopDistance, stopLevelPoints); return false; }
+    if ((tpPrice - ask) < (minStopDistance - m_point * 0.1)) { PrintFormat("Take Profit (%.*f) violates minimum stop level. Distance from Ask (%.*f) is %.*f, Minimum required: %.*f (%d points)", m_digits, tpPrice, m_digits, ask, m_digits, (tpPrice - ask), m_digits, minStopDistance, stopLevelPoints); return false; }
+
+    return true;
+}
+
+//+------------------------------------------------------------------+
+//| DrawTradeMarker Method Implementation                            |
+//+------------------------------------------------------------------+
+void CSLSR_EA::DrawTradeMarker(datetime time, double price)
+{
+    string label = StringFormat("TradeMarker_%s_%d_%d", m_symbol, m_magic_number, (int)time);
+    ObjectDelete(0, label);
+
+    if(!ObjectCreate(0, label, OBJ_ARROW_BUY, 0, time, price)) { PrintFormat("Failed to create trade marker arrow '%s'. Error: %d", label, GetLastError()); }
+    else
+    {
+       ObjectSetInteger(0, label, OBJPROP_COLOR, clrGreen);
+       ObjectSetInteger(0, label, OBJPROP_WIDTH, 1);
+       ObjectSetInteger(0, label, OBJPROP_ANCHOR, ANCHOR_BOTTOM);
+       ObjectSetString(0, label, OBJPROP_TOOLTIP, "SLSR Buy Entry");
+       ObjectSetInteger(0, label, OBJPROP_TIMEFRAMES, OBJ_ALL_PERIODS);
+    }
+}
+
+
+//+------------------------------------------------------------------+
+//| Tick Method Implementation - Main EA Logic Loop                  |
+//+------------------------------------------------------------------+
+void CSLSR_EA::Tick()
+{
+    // --- Initial Checks ---
+    if(!TerminalInfoInteger(TERMINAL_TRADE_ALLOWED) || !MQLInfoInteger(MQL_TRADE_ALLOWED)) { return; }
+
+    datetime currentTime = TimeCurrent();
+    if(!CheckTradingTime(currentTime)) { return; }
+
+    bool position_exists = false;
+    if(PositionSelect(m_symbol)) { if(PositionGetInteger(POSITION_MAGIC) == m_magic_number) { position_exists = true; } }
+    if (position_exists) { return; }
+
+    // --- Check Entry Signal ---
+    if(!CheckEntrySignal()) // Call the signal check method with refined logic
+    {
+        return; // Exit if no valid buy signal
+    }
+
+    // --- Signal Found - Proceed with Trade Logic ---
+
+    // Calculate ATR for SL/TP
+    double atrValue = GetATR();
+    if(atrValue <= 0) { return; } // Exit if ATR is invalid
+
+    // Calculate SL/TP levels
+    double slDistance = 0, tpDistance = 0, stopLoss = 0, takeProfit = 0;
+    if(!CalculateTradeParameters(atrValue, slDistance, tpDistance, stopLoss, takeProfit)) { return; } // Exit if parameters invalid
+
+    // Calculate Lot Size
+    double lotSize = CalculateLotSize(slDistance);
+    if(lotSize <= 0) { return; } // Exit if lot size invalid
+
+    // Final Price & Stop Level Check
+    MqlTick latest_tick;
+    if(!SymbolInfoTick(m_symbol, latest_tick) || latest_tick.ask <= 0 || latest_tick.bid <= 0) { PrintFormat("Failed to get valid tick for final check. Ask: %.*f, Bid: %.*f", m_digits, latest_tick.ask, m_digits, latest_tick.bid); return; }
+    if(!CheckStopLevel(latest_tick.ask, latest_tick.bid, stopLoss, takeProfit)) { PrintFormat("Trade aborted due to StopLevel violation check failure just before execution."); return; }
+
+    // --- Execute Trade ---
+    PrintFormat("Attempting BUY Trade (Signal Met): Symbol=%s, Lot=%.*f, Entry=%.*f, SL=%.*f (Dist: %.*f), TP=%.*f (Dist: %.*f), ATR=%.*f, Risk=%.2f%%",
+                m_symbol, m_volume_digits, lotSize, m_digits, latest_tick.ask,
+                m_digits, stopLoss, m_digits, slDistance,
+                m_digits, takeProfit, m_digits, tpDistance,
+                m_digits, atrValue, m_risk_percent);
+
+    string comment = MQL5InfoString(MQL5_PROGRAM_NAME) + "_v" + EA_VERSION;
+    MqlTradeRequest request;
+    MqlTradeResult result;
+    ZeroMemory(request);
+    ZeroMemory(result);
+
+    request.action = TRADE_ACTION_DEAL;
+    request.symbol = m_symbol;
+    request.volume = lotSize;
+    request.type = ORDER_TYPE_BUY;
+    request.price = latest_tick.ask;
+    request.sl = stopLoss;
+    request.tp = takeProfit;
+    request.deviation = m_deviation_points;
+    request.magic = (ulong)m_magic_number;
+    request.comment = comment;
+    request.type_filling = m_filling_type;
+    request.type_time = ORDER_TIME_GTC;
+
+    if(!OrderSend(request, result))
+    {
+        PrintFormat("OrderSend failed. Error code: %d", result.retcode);
+        PrintFormat("OrderSend Result Details: Retcode=%d, Deal=%d, Order=%d, Volume=%.*f, Price=%.*f, Bid=%.*f, Ask=%.*f, Comment=%s, Request ID=%d, Retcode External=%d",
+                    result.retcode, result.deal, result.order,
+                    m_volume_digits, result.volume, m_digits, result.price,
+                    m_digits, result.bid, m_digits, result.ask, result.comment, result.request_id, result.retcode_external);
+    }
+    else
+    {
+         PrintFormat("OrderSend successful. Request ID: %d, Retcode: %d", result.request_id, result.retcode);
+         if(result.retcode == TRADE_RETCODE_DONE || result.retcode == TRADE_RETCODE_PLACED || result.retcode == TRADE_RETCODE_DONE_PARTIAL)
+         {
+             PrintFormat("BUY order executed/placed successfully. Order Ticket: %d, Deal Ticket: %d, Lot: %.*f, Entry: %.*f, SL: %.*f, TP: %.*f",
+                         (int)result.order, (int)result.deal,
+                         m_volume_digits, result.volume,
+                         m_digits, result.price,
+                         m_digits, stopLoss, m_digits, takeProfit);
+
+             m_last_trade_time = currentTime; // Update last trade time
+             DrawTradeMarker(currentTime, result.price > 0 ? result.price : latest_tick.ask);
+         }
+         else
+         {
+             PrintFormat("OrderSend accepted but resulted in error state. Retcode: %d", result.retcode);
+             PrintFormat("OrderSend Result Details: Retcode=%d, Deal=%d, Order=%d, Volume=%.*f, Price=%.*f, Bid=%.*f, Ask=%.*f, Comment=%s, Request ID=%d, Retcode External=%d",
+                    result.retcode, result.deal, result.order,
+                    m_volume_digits, result.volume, m_digits, result.price,
+                    m_digits, result.bid, m_digits, result.ask, result.comment, result.request_id, result.retcode_external);
+         }
+    }
+}
+//+------------------------------------------------------------------+
